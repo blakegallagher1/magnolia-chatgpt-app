@@ -1,59 +1,80 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import type { GpcClient } from '@magnolia/gpc-client';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import type { MagnoliaClient } from '@magnolia/gpc-client';
+import { toToolError } from '../utils/errors.js';
 
-export const documentTools: Tool[] = [
-  {
-    name: 'document_search',
-    description: 'Search documents in the GPC-CRES document vault by keyword, deal, or type.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        query: { type: 'string' },
-        deal_id: { type: 'string' },
-        document_type: { type: 'string' },
-        limit: { type: 'integer', default: 10 },
-      },
+/**
+ * Register document search tools.
+ *
+ * Tools:
+ *  - search_documents: Semantic search over deal documents in Qdrant
+ */
+export function registerDocumentTools(server: McpServer, client: MagnoliaClient): void {
+  server.tool(
+    'search_documents',
+    'Semantic search across deal documents stored in the Qdrant vector database: appraisals, environmental reports, title commitments, leases, financial statements, due diligence reports, surveys, and more. Returns relevant text excerpts with source attribution.',
+    {
+      query: z
+        .string()
+        .describe(
+          'Natural language search query (e.g. "environmental Phase I findings", "tenant lease expiration dates", "cap rate in appraisal")',
+        ),
+      deal_id: z
+        .string()
+        .optional()
+        .describe('Limit search to documents for a specific deal'),
+      document_type: z
+        .string()
+        .optional()
+        .describe(
+          'Filter by document type (e.g. "appraisal", "phase_i", "title", "lease", "financial", "survey")',
+        ),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(20)
+        .default(5)
+        .describe('Number of results to return (default 5)'),
     },
-  },
-  {
-    name: 'document_get',
-    description: 'Retrieve a document by ID, including its extracted text and metadata.',
-    inputSchema: {
-      type: 'object',
-      required: ['document_id'],
-      properties: {
-        document_id: { type: 'string' },
-        include_full_text: { type: 'boolean', default: false },
-      },
+    async (args, _extra) => {
+      try {
+        const result = await client.documents.search({
+          query: args.query,
+          deal_id: args.deal_id,
+          document_type: args.document_type,
+          limit: args.limit,
+        });
+
+        const resultLines = result.results.map(
+          (r, i) =>
+            `**${i + 1}. ${r.title}** (${r.document_type}) — Relevance: ${(r.score * 100).toFixed(0)}%\n> ${r.snippet}`,
+        );
+
+        return {
+          structuredContent: {
+            query: result.query,
+            total: result.total,
+            results: result.results,
+          },
+          content: [
+            {
+              type: 'text' as const,
+              text: [
+                `## Document Search — "${result.query}"`,
+                `Found ${result.total} relevant documents:`,
+                '',
+                resultLines.join('\n\n'),
+              ].join('\n'),
+            },
+          ],
+          _meta: {
+            widget: 'document-viewer',
+          },
+        };
+      } catch (error) {
+        return toToolError(error, 'search_documents');
+      }
     },
-  },
-];
-
-const SearchSchema = z.object({
-  query: z.string().optional(),
-  deal_id: z.string().optional(),
-  document_type: z.string().optional(),
-  limit: z.number().int().default(10),
-});
-
-const GetSchema = z.object({
-  document_id: z.string(),
-  include_full_text: z.boolean().default(false),
-});
-
-export async function dispatchDocumentTool(
-  client: GpcClient,
-  name: string,
-  args: unknown,
-): Promise<unknown> {
-  if (name === 'document_search') {
-    const params = SearchSchema.parse(args);
-    return client.documents.search(params);
-  }
-  if (name === 'document_get') {
-    const params = GetSchema.parse(args);
-    return client.documents.get(params.document_id, { include_full_text: params.include_full_text });
-  }
-  throw new Error(`Unknown document tool: ${name}`);
+  );
 }

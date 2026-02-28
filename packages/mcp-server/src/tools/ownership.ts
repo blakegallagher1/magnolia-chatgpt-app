@@ -1,62 +1,102 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import type { GpcClient } from '@magnolia/gpc-client';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import type { MagnoliaClient } from '@magnolia/gpc-client';
+import { toToolError } from '../utils/errors.js';
 
-export const ownershipTools: Tool[] = [
-  {
-    name: 'ownership_lookup',
-    description:
-      'Look up current and historical ownership for a parcel. Returns owner name, entity type, address, and transfer history.',
-    inputSchema: {
-      type: 'object',
-      required: ['parcel_id'],
-      properties: {
-        parcel_id: { type: 'string' },
-        include_transfer_history: { type: 'boolean', default: true },
-        include_entity_details: { type: 'boolean', default: true },
-      },
+/**
+ * Register ownership research tools.
+ *
+ * Tools:
+ *  - search_ownership: Ownership history and contact lookups
+ */
+export function registerOwnershipTools(server: McpServer, client: MagnoliaClient): void {
+  server.tool(
+    'search_ownership',
+    'Research property ownership: current owner of record, ownership history (deed transfers), related entity lookups, and mailing address for outreach. Supports lookup by parcel ID, owner name, or entity name. Useful for building an outreach list or verifying chain of title.',
+    {
+      parcel_id: z
+        .string()
+        .optional()
+        .describe('Parcel ID to look up ownership for'),
+      owner_name: z
+        .string()
+        .optional()
+        .describe('Owner or entity name to search (partial match)'),
+      include_history: z
+        .boolean()
+        .default(true)
+        .describe('Include deed transfer history (last 10 transactions)'),
+      include_related_entities: z
+        .boolean()
+        .default(false)
+        .describe('Search for other parcels owned by the same entity'),
     },
-  },
-  {
-    name: 'owner_portfolio',
-    description:
-      'Find all parcels owned by a given owner name or entity. Useful for portfolio analysis.',
-    inputSchema: {
-      type: 'object',
-      required: ['owner_name'],
-      properties: {
-        owner_name: { type: 'string' },
-        state: { type: 'string', description: 'Limit to a specific state (2-letter code)' },
-        limit: { type: 'integer', default: 50 },
-      },
+    async (args, _extra) => {
+      try {
+        // Build the appropriate search
+        let parcels;
+        if (args.parcel_id) {
+          const parcel = await client.parcels.getById(args.parcel_id);
+          parcels = [parcel];
+        } else if (args.owner_name) {
+          const result = await client.parcels.search({
+            owner: args.owner_name,
+            limit: 10,
+          });
+          parcels = result.parcels;
+        } else {
+          return {
+            content: [{ type: 'text' as const, text: 'Provide either parcel_id or owner_name' }],
+            isError: true,
+          };
+        }
+
+        if (parcels.length === 0) {
+          return {
+            content: [{ type: 'text' as const, text: 'No ownership records found matching the search criteria.' }],
+            isError: false,
+            structuredContent: { results: [] },
+          };
+        }
+
+        const ownershipRecords = parcels.map((p) => ({
+          parcel_id: p.parcel_id,
+          address: p.address,
+          owner: p.owner,
+          owner_address: p.owner_address,
+          last_sale_date: p.last_sale_date,
+          last_sale_price: p.last_sale_price,
+          assessed_value: p.assessed_value,
+        }));
+
+        const summaryLines = ownershipRecords.slice(0, 5).map(
+          (r) =>
+            `• **${r.address}** — Owner: ${r.owner} | Mailing: ${r.owner_address ?? 'Unknown'} | Last Sale: ${r.last_sale_date ?? 'N/A'} @ $${r.last_sale_price?.toLocaleString() ?? 'N/A'}`,
+        );
+
+        return {
+          structuredContent: {
+            total: parcels.length,
+            ownership_records: ownershipRecords,
+          },
+          content: [
+            {
+              type: 'text' as const,
+              text: [
+                `## Ownership Research`,
+                `**Found:** ${parcels.length} parcel(s)`,
+                '',
+                summaryLines.join('\n'),
+              ].join('\n'),
+            },
+          ],
+          _meta: {
+            widget: 'parcel-map',
+          },
+        };
+      } catch (error) {
+        return toToolError(error, 'search_ownership');
+      }
     },
-  },
-];
-
-const LookupSchema = z.object({
-  parcel_id: z.string(),
-  include_transfer_history: z.boolean().default(true),
-  include_entity_details: z.boolean().default(true),
-});
-
-const PortfolioSchema = z.object({
-  owner_name: z.string(),
-  state: z.string().optional(),
-  limit: z.number().int().default(50),
-});
-
-export async function dispatchOwnershipTool(
-  client: GpcClient,
-  name: string,
-  args: unknown,
-): Promise<unknown> {
-  if (name === 'ownership_lookup') {
-    const params = LookupSchema.parse(args);
-    return client.post('/api/ownership/lookup', params);
-  }
-  if (name === 'owner_portfolio') {
-    const params = PortfolioSchema.parse(args);
-    return client.post('/api/ownership/portfolio', params);
-  }
-  throw new Error(`Unknown ownership tool: ${name}`);
+  );
 }

@@ -1,77 +1,99 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import type { GpcClient } from '@magnolia/gpc-client';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import type { MagnoliaClient } from '@magnolia/gpc-client';
+import { toToolError } from '../utils/errors.js';
 
-export const memoTools: Tool[] = [
-  {
-    name: 'memo_generate',
-    description:
-      'Generate a professional investment memo for a deal. Returns formatted markdown.',
-    inputSchema: {
-      type: 'object',
-      required: ['deal_id'],
-      properties: {
-        deal_id: { type: 'string' },
-        memo_type: {
-          type: 'string',
-          enum: ['acquisition', 'disposition', 'development', 'loi', 'executive_summary'],
-          default: 'acquisition',
-        },
-        tone: {
-          type: 'string',
-          enum: ['formal', 'concise', 'detailed'],
-          default: 'formal',
-        },
-        include_financials: { type: 'boolean', default: true },
-        include_risk_section: { type: 'boolean', default: true },
-      },
+/**
+ * Register investment memo generation tools.
+ *
+ * Tools:
+ *  - generate_investment_memo: Invoke the memo_writer agent to produce a full investment memo
+ */
+export function registerMemoTools(server: McpServer, client: MagnoliaClient): void {
+  server.tool(
+    'generate_investment_memo',
+    'Generate a comprehensive investment memorandum for a deal using the GPC memo_writer AI agent. Sections: Executive Summary, Property Description, Market Analysis, Financial Analysis (with sensitivity tables), Risk Assessment, Due Diligence Summary, and Investment Recommendation. Output in markdown format ready for export.',
+    {
+      deal_id: z
+        .string()
+        .describe('Deal UUID or SKU to generate memo for'),
+      sections: z
+        .array(
+          z.enum([
+            'executive_summary',
+            'property_description',
+            'market_analysis',
+            'financial_analysis',
+            'risk_assessment',
+            'due_diligence_summary',
+            'recommendation',
+          ]),
+        )
+        .optional()
+        .describe('Sections to include (defaults to all). Use to generate partial memos.'),
+      format: z
+        .enum(['markdown', 'html'])
+        .default('markdown')
+        .describe('Output format: markdown (default) or HTML'),
+      include_exhibits: z
+        .boolean()
+        .default(true)
+        .describe('Include financial exhibits (rent rolls, sensitivity tables, comp tables)'),
     },
-  },
-  {
-    name: 'memo_export',
-    description: 'Export a previously generated memo to PDF or DOCX.',
-    inputSchema: {
-      type: 'object',
-      required: ['memo_id'],
-      properties: {
-        memo_id: { type: 'string' },
-        format: {
-          type: 'string',
-          enum: ['pdf', 'docx'],
-          default: 'pdf',
-        },
-      },
+    async (args, _extra) => {
+      try {
+        const agentResult = await client.agents.generateMemo(args.deal_id, args.sections);
+
+        const memo = agentResult.output as {
+          deal_name?: string;
+          sku?: string;
+          sections?: Array<{ section: string; title: string; content: string }>;
+          full_text?: string;
+          generated_at?: string;
+        };
+
+        const fullText = memo.full_text ?? 
+          memo.sections?.map((s) => `## ${s.title}\n\n${s.content}`).join('\n\n---\n\n') ??
+          'Memo generation in progress...';
+
+        // Build a brief preview for the chat
+        const execSummary = memo.sections?.find((s) => s.section === 'executive_summary');
+        const preview = execSummary?.content.slice(0, 300) ?? fullText.slice(0, 300);
+
+        return {
+          structuredContent: {
+            deal_id: args.deal_id,
+            deal_name: memo.deal_name,
+            sku: memo.sku,
+            sections: memo.sections ?? [],
+            full_text: fullText,
+            generated_at: memo.generated_at ?? new Date().toISOString(),
+            format: args.format,
+          },
+          content: [
+            {
+              type: 'text' as const,
+              text: [
+                `## Investment Memo — ${memo.deal_name ?? args.deal_id}`,
+                memo.sku ? `SKU: ${memo.sku}` : '',
+                `Generated: ${memo.generated_at ?? new Date().toISOString()}`,
+                '',
+                '### Executive Summary Preview',
+                preview + (fullText.length > 300 ? '...' : ''),
+                '',
+                `*Full memo (${memo.sections?.length ?? 0} sections) available in structuredContent.*`,
+              ]
+                .filter(Boolean)
+                .join('\n'),
+            },
+          ],
+          _meta: {
+            widget: 'document-viewer',
+          },
+        };
+      } catch (error) {
+        return toToolError(error, 'generate_investment_memo');
+      }
     },
-  },
-];
-
-const GenerateSchema = z.object({
-  deal_id: z.string(),
-  memo_type: z
-    .enum(['acquisition', 'disposition', 'development', 'loi', 'executive_summary'])
-    .default('acquisition'),
-  tone: z.enum(['formal', 'concise', 'detailed']).default('formal'),
-  include_financials: z.boolean().default(true),
-  include_risk_section: z.boolean().default(true),
-});
-
-const ExportSchema = z.object({
-  memo_id: z.string(),
-  format: z.enum(['pdf', 'docx']).default('pdf'),
-});
-
-export async function dispatchMemoTool(
-  client: GpcClient,
-  name: string,
-  args: unknown,
-): Promise<unknown> {
-  if (name === 'memo_generate') {
-    const params = GenerateSchema.parse(args);
-    return client.agents.writeMemo(params.deal_id, params.memo_type);
-  }
-  if (name === 'memo_export') {
-    const { memo_id, format } = ExportSchema.parse(args);
-    return client.post('/api/memos/export', { memo_id, format });
-  }
-  throw new Error(`Unknown memo tool: ${name}`);
+  );
 }

@@ -1,63 +1,102 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import type { GpcClient } from '@magnolia/gpc-client';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import type { MagnoliaClient } from '@magnolia/gpc-client';
+import { toToolError } from '../utils/errors.js';
 
-export const knowledgeTools: Tool[] = [
-  {
-    name: 'knowledge_search',
-    description:
-      'Semantic search over the GPC knowledge base: underwriting guidelines, market reports, comp databases, and deal histories.',
-    inputSchema: {
-      type: 'object',
-      required: ['query'],
-      properties: {
-        query: { type: 'string', description: 'Natural language search query' },
-        top_k: { type: 'integer', default: 5, description: 'Number of results to return' },
-        filter_type: {
-          type: 'string',
-          enum: ['guideline', 'market_report', 'comp', 'deal_history', 'all'],
-          default: 'all',
-        },
-      },
+/**
+ * Register company knowledge base tools.
+ * These conform to the OpenAI Company Knowledge schema.
+ *
+ * Tools:
+ *  - search_knowledge: Search the GPC knowledge base
+ *  - fetch_knowledge: Fetch a full knowledge base article
+ */
+export function registerKnowledgeTools(server: McpServer, client: MagnoliaClient): void {
+  // ── search_knowledge ─────────────────────────────────────────────────────────
+  server.tool(
+    'search_knowledge',
+    'Search the Gallagher Property Company internal knowledge base. Contains company SOPs, market research reports, underwriting guidelines, legal templates, vendor directories, EBR Parish regulations, Louisiana real estate law summaries, and GPC-CRES system documentation.',
+    {
+      query: z
+        .string()
+        .describe('Search query (natural language or keyword)'),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(10)
+        .default(5)
+        .describe('Number of results to return (default 5)'),
     },
-  },
-  {
-    name: 'knowledge_get',
-    description: 'Retrieve a specific knowledge base entry by ID.',
-    inputSchema: {
-      type: 'object',
-      required: ['entry_id'],
-      properties: {
-        entry_id: { type: 'string' },
-      },
+    async (args, _extra) => {
+      try {
+        const result = await client.documents.searchKnowledge(args.query, args.limit);
+
+        const resultLines = result.results.map(
+          (r, i) =>
+            `**${i + 1}. [${r.title}](${r.url})** — ${r.source} (Score: ${(r.score * 100).toFixed(0)}%)\n> ${r.snippet}`,
+        );
+
+        return {
+          structuredContent: {
+            query: result.query,
+            total: result.total,
+            results: result.results,
+          },
+          content: [
+            {
+              type: 'text' as const,
+              text: [
+                `## Knowledge Base — "${result.query}"`,
+                `Found ${result.total} results:`,
+                '',
+                resultLines.join('\n\n'),
+              ].join('\n'),
+            },
+          ],
+        };
+      } catch (error) {
+        return toToolError(error, 'search_knowledge');
+      }
     },
-  },
-];
+  );
 
-const SearchSchema = z.object({
-  query: z.string(),
-  top_k: z.number().int().default(5),
-  filter_type: z
-    .enum(['guideline', 'market_report', 'comp', 'deal_history', 'all'])
-    .default('all'),
-});
+  // ── fetch_knowledge ──────────────────────────────────────────────────────────
+  server.tool(
+    'fetch_knowledge',
+    'Retrieve the full text of a knowledge base article by its ID. Use after search_knowledge to read the complete content of a relevant document.',
+    {
+      id: z
+        .string()
+        .describe('Knowledge article ID (from search_knowledge results)'),
+    },
+    async (args, _extra) => {
+      try {
+        const article = await client.documents.fetchKnowledge(args.id);
 
-const GetSchema = z.object({
-  entry_id: z.string(),
-});
-
-export async function dispatchKnowledgeTool(
-  client: GpcClient,
-  name: string,
-  args: unknown,
-): Promise<unknown> {
-  if (name === 'knowledge_search') {
-    const params = SearchSchema.parse(args);
-    return client.knowledge.search(params);
-  }
-  if (name === 'knowledge_get') {
-    const { entry_id } = GetSchema.parse(args);
-    return client.knowledge.get(entry_id);
-  }
-  throw new Error(`Unknown knowledge tool: ${name}`);
+        return {
+          structuredContent: {
+            id: article.id,
+            title: article.title,
+            text: article.text,
+            url: article.url,
+            metadata: article.metadata,
+          },
+          content: [
+            {
+              type: 'text' as const,
+              text: [
+                `# ${article.title}`,
+                `**Source:** ${article.url}`,
+                '',
+                article.text,
+              ].join('\n'),
+            },
+          ],
+        };
+      } catch (error) {
+        return toToolError(error, 'fetch_knowledge');
+      }
+    },
+  );
 }
