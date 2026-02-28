@@ -11,7 +11,8 @@ export interface ToolErrorResult {
 /**
  * Convert any caught error into a MCP tool error result.
  */
-export function toToolError(error: unknown, toolName: string): ToolErrorResult {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function toToolError(error: unknown, toolName: string): any {
   const message = formatError(error);
   return {
     content: [
@@ -30,7 +31,7 @@ export function toToolError(error: unknown, toolName: string): ToolErrorResult {
 export function formatError(error: unknown): string {
   if (error instanceof Error) {
     // If the error has a structured API error shape, include the code
-    const maybeCode = (error as Record<string, unknown>)['code'];
+    const maybeCode = (error as unknown as Record<string, unknown>)['code'];
     if (typeof maybeCode === 'string') {
       return `${maybeCode}: ${error.message}`;
     }

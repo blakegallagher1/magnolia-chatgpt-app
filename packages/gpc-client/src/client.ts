@@ -1,109 +1,180 @@
-import type { ApiResult } from '@magnolia/shared-types';
+import type { ApiError } from '@magnolia/shared-types';
 
-// ─── Client Config ────────────────────────────────────────────────────────────
+// ─── Client Configuration ─────────────────────────────────────────────────────
 
-/** Configuration for the GPC API client */
 export interface GpcClientConfig {
-  /** Base URL for the GPC-CRES FastAPI gateway */
+  /** Base URL of the GPC-CRES FastAPI gateway */
   baseUrl: string;
-  /** Bearer token / API key */
+  /** API key for bearer token authentication */
   apiKey: string;
-  /** Optional request timeout in ms (default: 30000) */
+  /** Request timeout in milliseconds (default: 30000) */
   timeoutMs?: number;
+  /** Max retry attempts on transient errors (default: 2) */
+  maxRetries?: number;
 }
 
-// ─── HTTP Error ───────────────────────────────────────────────────────────────
+// ─── Internal Helpers ─────────────────────────────────────────────────────────
 
-export class GpcApiError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly code: string,
-    message: string,
-    public readonly details?: Record<string, unknown>
-  ) {
-    super(message);
+/** HTTP methods supported by the client */
+type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+
+/** Represents a structured gateway error */
+class GpcApiError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly details: Record<string, unknown>;
+
+  constructor(error: ApiError) {
+    super(error.message);
     this.name = 'GpcApiError';
+    this.status = error.status;
+    this.code = error.code;
+    this.details = error.details ?? {};
   }
 }
 
-// ─── Base Client ─────────────────────────────────────────────────────────────
+// ─── Base Client ──────────────────────────────────────────────────────────────
 
 /**
  * Base HTTP client for the GPC-CRES FastAPI gateway.
- * Handles auth, error normalization, and timeout.
+ * Uses native fetch (Cloudflare Workers compatible).
  */
 export class GpcClient {
-  protected readonly config: Required<GpcClientConfig>;
+  private readonly baseUrl: string;
+  private readonly apiKey: string;
+  private readonly timeoutMs: number;
+  private readonly maxRetries: number;
 
   constructor(config: GpcClientConfig) {
-    this.config = {
-      timeoutMs: 30_000,
-      ...config,
-    };
+    // Strip trailing slash
+    this.baseUrl = config.baseUrl.replace(/\/$/, '');
+    this.apiKey = config.apiKey;
+    this.timeoutMs = config.timeoutMs ?? 30_000;
+    this.maxRetries = config.maxRetries ?? 2;
   }
 
+  // ─── Public Methods ─────────────────────────────────────────────────────────
+
+  async get<T>(path: string, params?: Record<string, unknown>): Promise<T> {
+    const url = this.buildUrl(path, params);
+    return this.request<T>('GET', url, undefined);
+  }
+
+  async post<T>(path: string, body: unknown): Promise<T> {
+    const url = this.buildUrl(path);
+    return this.request<T>('POST', url, body);
+  }
+
+  async put<T>(path: string, body: unknown): Promise<T> {
+    const url = this.buildUrl(path);
+    return this.request<T>('PUT', url, body);
+  }
+
+  async patch<T>(path: string, body: unknown): Promise<T> {
+    const url = this.buildUrl(path);
+    return this.request<T>('PATCH', url, body);
+  }
+
+  async delete<T>(path: string): Promise<T> {
+    const url = this.buildUrl(path);
+    return this.request<T>('DELETE', url, undefined);
+  }
+
+  // ─── Private Helpers ────────────────────────────────────────────────────────
+
   /**
-   * Make an authenticated GET request.
+   * Build a URL with optional query string parameters.
    */
-  async get<T>(path: string, params?: Record<string, string | number | boolean>): Promise<T> {
-    const url = new URL(path, this.config.baseUrl);
+  private buildUrl(path: string, params?: Record<string, unknown>): string {
+    const url = new URL(path, this.baseUrl);
     if (params) {
       for (const [key, value] of Object.entries(params)) {
-        url.searchParams.set(key, String(value));
+        if (value !== undefined && value !== null) {
+          if (Array.isArray(value)) {
+            for (const item of value) {
+              url.searchParams.append(key, String(item));
+            }
+          } else {
+            url.searchParams.set(key, String(value));
+          }
+        }
       }
     }
-    return this.request<T>('GET', url.toString());
+    return url.toString();
   }
 
   /**
-   * Make an authenticated POST request with JSON body.
+   * Execute an HTTP request with timeout, retries, and error handling.
    */
-  async post<T>(path: string, body: unknown): Promise<T> {
-    const url = new URL(path, this.config.baseUrl);
-    return this.request<T>('POST', url.toString(), body);
-  }
-
-  /**
-   * Make an authenticated PATCH request with JSON body.
-   */
-  async patch<T>(path: string, body: unknown): Promise<T> {
-    const url = new URL(path, this.config.baseUrl);
-    return this.request<T>('PATCH', url.toString(), body);
-  }
-
-  // ─── Private ───────────────────────────────────────────────────────────────────────
-
-  private async request<T>(method: string, url: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: HttpMethod,
+    url: string,
+    body: unknown,
+    attempt = 0,
+  ): Promise<T> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
+    const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
 
     try {
       const response = await fetch(url, {
         method,
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.config.apiKey}`,
-          'Accept': 'application/json',
+          Authorization: `Bearer ${this.apiKey}`,
+          'X-Client': 'magnolia-mcp/1.0',
         },
-        body: body !== undefined ? JSON.stringify(body) : undefined,
+        body: body !== undefined ? JSON.stringify(body) : null,
         signal: controller.signal,
       });
 
-      const json = await response.json() as ApiResult<T>;
+      clearTimeout(timeoutId);
 
-      if (!response.ok || !json.success) {
-        const err = json as { success: false; error: string; code: string; details?: Record<string, unknown> };
-        throw new GpcApiError(
-          response.status,
-          err.code ?? 'UNKNOWN',
-          err.error ?? response.statusText,
-          err.details
-        );
+      // Parse response body
+      const contentType = response.headers.get('content-type') ?? '';
+      const isJson = contentType.includes('application/json');
+      const responseBody = isJson
+        ? ((await response.json()) as unknown)
+        : await response.text();
+
+      if (!response.ok) {
+        // Try to extract a structured error
+        if (isJson && typeof responseBody === 'object' && responseBody !== null) {
+          const maybeError = responseBody as Record<string, unknown>;
+          const apiError: ApiError = {
+            code: String(maybeError['code'] ?? 'API_ERROR'),
+            message: String(maybeError['detail'] ?? maybeError['message'] ?? 'Unknown gateway error'),
+            details: (maybeError['details'] as Record<string, unknown>) ?? {},
+            status: response.status,
+          };
+          throw new GpcApiError(apiError);
+        }
+        throw new GpcApiError({
+          code: 'HTTP_ERROR',
+          message: `Gateway returned ${response.status}: ${String(responseBody)}`,
+          status: response.status,
+        });
       }
 
-      return (json as { success: true; data: T }).data;
-    } finally {
-      clearTimeout(timer);
+      return responseBody as T;
+    } catch (error) {
+      clearTimeout(timeoutId);
+
+      // Retry on network errors and 5xx responses (not 4xx)
+      const isRetryable =
+        error instanceof TypeError || // network error
+        (error instanceof GpcApiError && error.status >= 500);
+
+      if (isRetryable && attempt < this.maxRetries) {
+        // Exponential backoff: 200ms, 400ms
+        await sleep(200 * Math.pow(2, attempt));
+        return this.request<T>(method, url, body, attempt + 1);
+      }
+
+      throw error;
     }
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

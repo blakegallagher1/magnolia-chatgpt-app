@@ -69,23 +69,26 @@ export class AgentsClient {
     dealId: string,
     conversationId?: string,
   ): Promise<AgentInvokeResult> {
-    return this.invoke({
-      agent_name: 'deal_manager',
-      payload: { deal_id: dealId, conversation_id: conversationId },
-    });
+    const req: AgentInvokeRequest = {
+      agent_name: 'underwriter',
+      input: { deal_id: dealId },
+    };
+    if (conversationId !== undefined) {
+      req.conversation_id = conversationId;
+    }
+    return this.invoke(req);
   }
 
   /**
    * Invoke the memo writer agent.
    */
-  async writeMemo(
+  async generateMemo(
     dealId: string,
-    memoType: string,
-    conversationId?: string,
+    sections?: string[],
   ): Promise<AgentInvokeResult> {
     return this.invoke({
       agent_name: 'memo_writer',
-      payload: { deal_id: dealId, memo_type: memoType, conversation_id: conversationId },
+      input: { deal_id: dealId, sections: sections ?? 'all' },
     });
   }
 }

@@ -1,63 +1,93 @@
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
-import { GpcClient } from '@magnolia/gpc-client';
-import { allTools, dispatchTool } from './tools/index.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
+import { createGpcClient } from '@magnolia/gpc-client';
+import { registerAllTools } from './tools/index.js';
+import { registerWidgets } from './widgets/registry.js';
+import { SessionState } from './state/session.js';
+import { validateApiKey } from './utils/auth.js';
 
-const API_BASE_URL = process.env.GPC_API_URL ?? 'https://gpc-cres.gallagherpropco.com';
-const API_KEY = process.env.GPC_API_KEY ?? '';
+// Re-export the Durable Object class so Wrangler can find it
+export { SessionState };
 
-const client = new GpcClient({ baseUrl: API_BASE_URL, apiKey: API_KEY });
+// ─── Environment Interface ────────────────────────────────────────────────────
 
-const server = new Server(
-  {
-    name: 'gpc-cres-mcp',
-    version: '0.1.0',
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  },
-);
-
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return { tools: allTools };
-});
-
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-  try {
-    const result = await dispatchTool(client, name, args ?? {});
-    return {
-      content: [
-        {
-          type: 'text',
-          text: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
-        },
-      ],
-    };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      content: [{ type: 'text', text: `Error: ${message}` }],
-      isError: true,
-    };
-  }
-});
-
-async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  // eslint-disable-next-line no-console
-  console.error('GPC-CRES MCP server running on stdio');
+export interface Env {
+  /** Base URL of the GPC-CRES FastAPI gateway */
+  GPC_GATEWAY_URL: string;
+  /** API key for bearer token authentication to the gateway */
+  GPC_API_KEY: string;
+  /** Durable Object namespace for per-conversation session state */
+  SESSION_STATE: DurableObjectNamespace;
+  /** 'production' | 'development' */
+  ENVIRONMENT: string;
+  /** Static widget assets (from [assets] binding) */
+  ASSETS?: { fetch(request: Request): Promise<Response> };
 }
 
-main().catch((err) => {
-  // eslint-disable-next-line no-console
-  console.error('Fatal error:', err);
-  process.exit(1);
-});
+// ─── Worker Entry Point ───────────────────────────────────────────────────────
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+    const pathname = url.pathname;
+
+    // ── Health check ──────────────────────────────────────────────────────────
+    if (pathname === '/' || pathname === '/health') {
+      return new Response(
+        JSON.stringify({
+          service: 'Magnolia Intelligence Platform',
+          version: '1.0.0',
+          status: 'ok',
+          environment: env.ENVIRONMENT,
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        },
+      );
+    }
+
+    // ── MCP endpoint ──────────────────────────────────────────────────────────
+    if (pathname === '/mcp' || pathname.startsWith('/mcp/')) {
+      // Validate API key (for developer mode, checks a static key from env or header)
+      const authError = validateApiKey(request, env);
+      if (authError) return authError;
+
+      const server = new McpServer({
+        name: 'magnolia-intelligence',
+        version: '1.0.0',
+      });
+
+      const client = createGpcClient({
+        baseUrl: env.GPC_GATEWAY_URL,
+        apiKey: env.GPC_API_KEY,
+      });
+
+      // Register all tools and widget resources
+      registerAllTools(server, client, env);
+      registerWidgets(server, env);
+
+      // Delegate to MCP SDK's Streamable HTTP transport handler
+      const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      await server.connect(transport);
+      return transport.handleRequest(request);
+    }
+
+    // ── Widget asset serving ──────────────────────────────────────────────────
+    if (pathname.startsWith('/widgets/')) {
+      if (env.ASSETS) {
+        return env.ASSETS.fetch(request);
+      }
+      return new Response('Widget assets not available', { status: 404 });
+    }
+
+    // ── Durable Object session proxy ──────────────────────────────────────────
+    if (pathname.startsWith('/session/')) {
+      const sessionId = url.searchParams.get('id') ?? 'default';
+      const stub = env.SESSION_STATE.get(env.SESSION_STATE.idFromName(sessionId));
+      return stub.fetch(request);
+    }
+
+    return new Response('Not Found', { status: 404 });
+  },
+} satisfies ExportedHandler<Env>;
