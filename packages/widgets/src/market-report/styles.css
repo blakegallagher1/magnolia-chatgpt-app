@@ -1,0 +1,103 @@
+/* Market Report Widget Styles */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+.mr-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: #111827;
+  border-radius: 8px;
+  overflow: hidden;
+  font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  color: #F9FAFB;
+}
+
+.mr-empty {
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 32px;
+}
+
+.mr-empty-icon { font-size: 32px; }
+.mr-empty-text { font-size: 14px; font-weight: 600; color: #9CA3AF; }
+.mr-empty-sub { font-size: 12px; color: #4B5563; text-align: center; }
+
+.mr-header {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 14px;
+  background: #0A0F1C;
+  border-bottom: 1px solid #1F2937;
+  flex-shrink: 0;
+  gap: 2px;
+}
+
+.mr-label { font-size: 10px; font-weight: 700; color: #C8A951; text-transform: uppercase; letter-spacing: 0.1em; }
+.mr-title { font-size: 13px; font-weight: 600; color: #F9FAFB; }
+.mr-subtitle { font-size: 11px; color: #6B7280; }
+
+.mr-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+  gap: 1px;
+  background: #1F2937;
+  flex-shrink: 0;
+}
+
+.stat-tile {
+  background: #111827;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stat-label { font-size: 10px; color: #6B7280; text-transform: uppercase; letter-spacing: 0.08em; }
+.stat-value { font-size: 16px; font-weight: 700; color: #F9FAFB; }
+
+.stat-delta { font-size: 11px; font-weight: 500; }
+.stat-delta--up { color: #10B981; }
+.stat-delta--down { color: #EF4444; }
+.stat-delta--flat { color: #6B7280; }
+
+.chart-container {
+  flex: 1;
+  min-height: 120px;
+  max-height: 200px;
+  padding: 12px 14px;
+  position: relative;
+}
+
+.mr-metrics {
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid #1F2937;
+  flex-shrink: 0;
+}
+
+.metric-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.metric-row-label { font-size: 11px; color: #6B7280; width: 120px; flex-shrink: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.metric-row-bar-track {
+  flex: 1;
+  height: 4px;
+  background: #1F2937;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.metric-row-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+.metric-row-value { font-size: 11px; font-weight: 600; color: #D1D5DB; width: 60px; text-align: right; flex-shrink: 0; }
